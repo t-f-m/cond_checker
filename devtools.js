@@ -16,6 +16,7 @@ var $next_enemy = null;
 var $is_boss = false;
 var $material = {};
 var $quest_count = 0;
+var $quest_exec_count = 0;
 var $quest_list = {};
 var $battle_count = 0;
 var $ndock_list = {};
@@ -23,6 +24,10 @@ var $enemy_id = null;
 var $battle_log = [];
 var $last_mission = {};
 var $beginhps = null;
+var $beginhps_c = null;
+var $f_damage_rate = 0;
+var $e_damage_rate = 0;
+
 
 //-------------------------------------------------------------------------
 // Ship クラス.
@@ -46,16 +51,8 @@ Ship.prototype.name_lv = function() {
 	return ship_name(this.ship_id) + 'Lv' + this.lv;
 };
 
-Ship.prototype.kira_name = function() {
-	return (this.c_cond >= 85) ? '*** ' : // 三重キラ.
-		   (this.c_cond >= 53) ? '** ' : // 回避向上キラ.
-		   (this.c_cond >  49) ? '* ' : // キラ.
-		   (this.c_cond == 49) ? '. ' : // normal
-		 /* this.c_cond < 49 */  '> '; // recovering
-};
-
-Ship.prototype.cond_diff_name = function() {
-	return this.c_cond + diff_name(this.c_cond, this.p_cond);
+Ship.prototype.kira_cond_diff_name = function() {
+	return kira_name(this.c_cond) + this.c_cond + diff_name(this.c_cond, this.p_cond);
 };
 
 Ship.prototype.fuel_name = function() {
@@ -213,6 +210,14 @@ function percent_name_unless100(now, max) {	// now:1, max:2 -> "(50%)"
 	if (!max || now == max) return '';
 	return '(' + percent_name(now, max) + ')';
 }
+
+function kira_name(cond) {
+	return (cond >= 85) ? '*** ' : // 三重キラ.
+		   (cond >= 53) ? '** ' : // 回避向上キラ.
+		   (cond >  49) ? '* ' : // キラ.
+		   (cond == 49) ? '. ' : // normal
+		 /* cond < 49 */  '> '; // recovering
+};
 
 function item_name(id) {
 	switch (id) {
@@ -455,8 +460,11 @@ function hp_status_on_battle(nowhp, maxhp, beginhp) {
 function on_port(json) {
 		var req = [];
 		var unlock_names = [];
+		var lock_condlist = {};
+		var cond85 = 0;
+		var cond53 = 0;
+		var cond50 = 0;
 		var lockeditem_list = {};
-		var $unlock_ship = 0;
 		var $unlock_slotitem = 0;
 		var $leveling_slotitem = 0;
 		//
@@ -473,15 +481,22 @@ function on_port(json) {
 			}
 		}
 		//
-		// 未ロック艦とロック装備持ち艦を検出する.
+		// ロック艦のcond別一覧、未ロック艦一覧、ロック装備持ち艦を検出する.
 		for (var id in $ship_list) {
 			var ship = $ship_list[id];
 			var name = ship.name_lv();
 			if (!ship.locked) {
-				$unlock_ship++;
 				var n = count_unless(ship.slot, -1); // スロット装備数.
 				$unlock_slotitem += n;
 				unlock_names.push(name + (n ? "*" : "")); // 装備持ちなら、名前の末尾に"*"を付ける.
+			}
+			else {	// locked
+				var cond = ship.c_cond;
+				if (!lock_condlist[cond]) lock_condlist[cond] = [];
+				lock_condlist[cond].push(name);
+				if      (cond >= 85) cond85++; // 三重キラ.
+				else if (cond >= 53) cond53++; // 回避向上キラ.
+				else if (cond >  49) cond50++; // キラ.
 			}
 			if (ship.slot) {
 				ship.slot.forEach(function(id) {
@@ -493,15 +508,13 @@ function on_port(json) {
 		}
 		unlock_names.reverse();	// 最新の艦を先頭にする.
 		//
-		// 艦娘と装備の数を表示する.
+		// 艦娘と装備数を検出する.
 		var basic = json.api_data.api_basic;
 		if (basic) {
 			$max_ship     = basic.api_max_chara;
 			$max_slotitem = basic.api_max_slotitem + 3;
-			$combined_flag = basic.api_combined_flag;
+			$combined_flag = json.api_data.api_combined_flag;
 		}
-		req.push('艦娘保有数:' + Object.keys($ship_list).length + '/' + $max_ship + '(未ロック艦:' + $unlock_ship + ')');
-		req.push('装備保有数:' + Object.keys($slotitem_list).length + '/' + $max_slotitem + '(未ロック艦装備:' + $unlock_slotitem + ', 改修中装備:' + $leveling_slotitem + ')');
 		//
 		// 資材変化を表示する.
 		var material = json.api_data.api_material;
@@ -517,12 +530,28 @@ function on_port(json) {
 		}
 		req.push('資材増減数:' + msg.join(', '));
 		//
-		// 未ロック艦一覧.
+		// 艦娘保有数、未ロック艦一覧、ロック艦キラ付一覧を表示する.
+		req.push('艦娘保有数:' + Object.keys($ship_list).length + '/' + $max_ship
+			+ '(未ロック:' + unlock_names.length + ', キラ付:***' + cond85 + ' **' + cond53 + ' *' + cond50 + ')');
+		var msg = ['YPS_ship_list'];
 		if (unlock_names.length > 0) {
-			req.push('## 未ロック艦一覧');
-			req.push(['unlock_names', unlock_names.join(', ')]);
+			msg.push('## 未ロック艦一覧');
+			msg.push('\t|' + unlock_names.join(', '));
 		}
-		// ロック装備一覧.
+		if (Object.keys(lock_condlist).length > 0) {
+			msg.push('## ロック艦一覧');
+			msg.push('\t==cond\t==艦名'); // 表ヘッダ
+			for (var cond = 100; cond >= 0; --cond) {
+				var a = lock_condlist[cond];
+				if (a) msg.push('\t' + kira_name(cond) + cond + '\t|' + a.join(', '));
+			}
+		}
+		msg.push('---');
+		if (msg.length > 2) req.push(msg);
+		//
+		// 装備数、ロック装備一覧を表示する.
+		req.push('装備保有数:' + Object.keys($slotitem_list).length + '/' + $max_slotitem
+			+ '(未ロック艦装備:' + $unlock_slotitem + ', 改修中装備:' + $leveling_slotitem + ')');
 		var lockeditem_ids = Object.keys(lockeditem_list);
 		if (lockeditem_ids.length > 0) {
 			lockeditem_ids.sort(function(a, b) {	// 種別ID配列を表示順に並べ替える.
@@ -533,19 +562,20 @@ function on_port(json) {
 				// if (!ret) ret = a - b; // 種別ID値での大小判定.
 				return ret;
 			});
-			msg = ['lockeditem_list'];
+			var msg = ['YPS_lockeditem_list'];
+			msg.push('## ロック装備一覧');
 			msg.push('\t==装備名\t==個数\t==使用艦名'); // 表ヘッダ.
 			lockeditem_ids.forEach(function(id) {
 				var item = lockeditem_list[id];
 				msg.push('\t' + slotitem_name(id) + '\t' + item.ship_names.length + '/' + item.count + '\t|' + item.ship_names.join(', ')); 
 			});
-			req.push('## ロック装備一覧');
+			msg.push('---');
 			req.push(msg);
 		}
 		//
 		// 遂行中任務を一覧表示する.
 		if (Object.keys($quest_list).length > 0) {
-			msg = ['quest_list'];
+			var msg = ['YPS_quest_list'];
 			for (var id in $quest_list) {
 				var quest = $quest_list[id];
 				if (quest.api_state > 1) {
@@ -559,7 +589,7 @@ function on_port(json) {
 				}
 			}
 			if (msg.length > 1) {
-				req.push('## 任務');
+				req.push('任務遂行数:' + $quest_exec_count + '/' + $quest_count);
 				req.push(msg);
 			}
 		}
@@ -567,10 +597,10 @@ function on_port(json) {
 		//
 		// 各艦隊の情報を一覧表示する.
 		for (var f_id in $fdeck_list) {
-			msg = ['fdeck_list' + f_id];
+			var msg = ['YPS_fdeck_list' + f_id];
 			msg.push('\t==cond\t==艦名Lv\t==hp\t==修理\t==燃料\t==弾薬\t==装備'); // 表ヘッダ. 慣れれば不用な気がする.
 			var deck = $fdeck_list[f_id];
-			req.push(($combined_flag ? '## 連合艦隊' : '## 艦隊') + f_id + ': ' + deck.api_name);
+			req.push(($combined_flag && f_id <= 2 ? '## 連合艦隊' : '## 艦隊') + f_id + ': ' + deck.api_name);
 			var lv_sum = 0;
 			var drumcan = {ships:0, sum:0, msg:''};
 			for (var i = 0, ship, s_id; ship = $ship_list[s_id = deck.api_ship[i]]; ++i) {
@@ -586,7 +616,7 @@ function on_port(json) {
 					var c_date = new Date(ndock.api_complete_time);
 					rp_str = '入渠' + ndock.api_id + ':' + c_date.toLocaleString();
 				}
-				msg.push('\t' + (i + 1) + ship.kira_name() + ship.cond_diff_name()
+				msg.push('\t' + (i + 1) + ship.kira_cond_diff_name()
 					+ '\t' + ship.name_lv()
 					+ '\t' + hp_str
 					+ '\t' + rp_str
@@ -659,26 +689,35 @@ function on_battle_result(json) {
 	var d = json.api_data;
 	var e = d.api_enemy_info;
 	var g = d.api_get_ship;
-	var mvp  = d.api_mvp;
-	var lost = d.api_lost_flag;
-	var msg  = d.api_win_rank + ':';
+	var mvp   = d.api_mvp;
+	var mvp_c = d.api_mvp_combined;
+	var lost  = d.api_lost_flag;
+	var msg  = '';
 	if (e) {
+		var rank = d.api_win_rank;
 		msg += e.api_deck_name;
 		if (d.api_ship_id) {
 			var total = count_unless(d.api_ship_id, -1);
 			msg += '(' + d.api_dests + '/' + total + ')';
+			if (rank == 'S' && $f_damage_rate == 0) rank = '完S';
 		}
+		msg += ':' + rank;
 		var fleet = $enemy_list[$enemy_id];
 		if (fleet) {
 			fleet[0] = e.api_deck_name + ':';
 		}
-		$battle_log.push($next_enemy + '(' + e.api_deck_name + '):' + d.api_win_rank);
+		$battle_log.push($next_enemy + '(' + e.api_deck_name + '):' + rank);
 		$last_mission[$battle_deck_id] = '前回出撃: ' + $battle_log.join(' →');
 	}
 	if (mvp) {
 		var id = $fdeck_list[$battle_deck_id].api_ship[mvp-1];
 		var ship = $ship_list[id];
 		msg += '\nMVP: ' + ship.name_lv() + ' +' + d.api_get_ship_exp[mvp] + 'exp';
+	}
+	if (mvp_c) {
+		var id = $fdeck_list[2].api_ship[mvp_c-1];
+		var ship = $ship_list[id];
+		msg += '\nMVP: ' + ship.name_lv() + ' +' + d.api_get_ship_exp_combined[mvp_c] + 'exp';
 	}
 	if (lost) {
 		for (var i in lost) {
@@ -765,23 +804,39 @@ function push_fdeck_status(req, fdeck, maxhps, nowhps, beginhps) {
 	}
 }
 
-function push_guess_result(req, nowhps, maxhps, beginhps) {
+function push_guess_result(req, nowhps, maxhps, beginhps, nowhps_c, maxhps_c, beginhps_c) {
 	// 友軍の轟沈／護衛退避には未対応
 	// 応急修理発動時の計算も不明
 	var f_damage_total = 0;
 	var f_hp_total = 0;
+	var f_lost_count = 0;
 	var e_damage_total = 0;
 	var e_hp_total = 0;
 	var e_count = 0;
 	var e_lost_count = 0;
 	var e_leader_lost = false;
 	for(var i = 1; i <= 6; ++i){
+		// 友軍被害集計.
 		if(maxhps[i] == -1) continue;
 		var n = nowhps[i];
 		f_damage_total += beginhps[i] - Math.max(0, n);
 		f_hp_total += beginhps[i];
+		if (n <= 0) {
+			++f_lost_count;
+		}
+	}
+	for (var i = 1; i <= 6; ++i) {
+		// 連合第二友軍被害集計.
+		if(!maxhps_c || maxhps_c[i] == -1) continue;
+		var n = nowhps_c[i];
+		f_damage_total += beginhps_c[i] - Math.max(0, n);
+		f_hp_total += beginhps_c[i];
+		if (n <= 0) {
+			++f_lost_count;
+		}
 	}
 	for(var i = 7; i <= 12; ++i){
+		// 敵艦被害集計.
 		if(maxhps[i] == -1) continue;
 		var n = nowhps[i];
 		++e_count;
@@ -792,7 +847,9 @@ function push_guess_result(req, nowhps, maxhps, beginhps) {
 			if(i == 7) e_leader_lost = true;
 		}
 	}
-	if(e_count == e_lost_count){
+	$f_damage_rate = f_damage_total / f_hp_total;
+	$e_damage_rate = e_damage_total / e_hp_total;
+	if (e_count == e_lost_count && f_lost_count == 0) {
 		if(f_damage_total == 0) {
 			req.push('推定：完S');
 		} else {
@@ -800,16 +857,14 @@ function push_guess_result(req, nowhps, maxhps, beginhps) {
 		}
 		return;
 	}
-	if (e_lost_count >= (e_count == 6 ? 4 : e_count/2)) {
+	if (e_lost_count >= (e_count == 6 ? 4 : e_count/2) && f_lost_count == 0) {
 		req.push('推定：A');
 		return;
 	}
-	var f_damage_rate = f_damage_total/f_hp_total;
-	var e_damage_rate = e_damage_total/e_hp_total;
-	var rate = e_damage_rate == 0 ? 0 : // 潜水艦お見合い等ではDになるので敵ダメ判定を優先
-			   f_damage_rate == 0 ? 3 : // 0除算回避／こちらが無傷なら1ダメ以上与えていればBなのでrateを3に
-			   e_damage_rate/f_damage_rate;
-	if(e_leader_lost || rate >= 2.5){
+	var rate = $e_damage_rate == 0 ? 0 : // 潜水艦お見合い等ではDになるので敵ダメ判定を優先
+			   $f_damage_rate == 0 ? 3 : // 0除算回避／こちらが無傷なら1ダメ以上与えていればBなのでrateを3に
+			   $e_damage_rate / $f_damage_rate;
+	if ((e_leader_lost && f_lost_count < e_lost_count) || rate >= 2.5) {
 		req.push('推定：B');
 		return;
 	} else if(rate >= 1){ //要検証
@@ -841,9 +896,9 @@ function on_battle(json) {
 	calc_kouku_damage(airplane, nowhps, d.api_kouku2, nowhps_c); // 航空戦第二波.
 	calc_damage(nowhps, d.api_opening_atack, nowhps_c);	// 開幕雷撃.
 	calc_damage(nowhps, d.api_hougeki, nowhps_c);	// midnight
-	calc_damage(nowhps, d.api_hougeki1, nowhps_c);
+	calc_damage(nowhps, d.api_hougeki1, $is_water ? null : nowhps_c);
 	calc_damage(nowhps, d.api_hougeki2);
-	calc_damage(nowhps, d.api_hougeki3);
+	calc_damage(nowhps, d.api_hougeki3, $is_water ? nowhps_c : null);
 	calc_damage(nowhps, d.api_raigeki, nowhps_c);
 	if (d.api_support_flag == 1) calc_damage(nowhps, d.api_support_info.api_support_airattack.api_stage3); // 1:航空支援.
 	if (d.api_support_flag == 2) calc_damage(nowhps, d.api_support_info.api_support_hourai); // 2:支援射撃
@@ -872,7 +927,8 @@ function on_battle(json) {
 	if (airplane.seiku != null) req.push(seiku_name(airplane.seiku));
 
 	if (!$beginhps) $beginhps = beginhps;
-	push_guess_result(req, nowhps, maxhps, $beginhps); // 第二艦隊はほぼ勝敗に影響しないので具体的な影響データあるまでは無視
+	if (!$beginhps_c) $beginhps_c = beginhps_c;
+	push_guess_result(req, nowhps, maxhps, $beginhps, nowhps_c, maxhps_c, $beginhps_c);
 	req.push('## friend damage');
 	push_fdeck_status(req, fdeck, maxhps, nowhps, beginhps);
 	req.push('被撃墜数: ' + airplane.f_lostcount);
@@ -1023,6 +1079,7 @@ chrome.devtools.network.onRequestFinished.addListener(function (request) {
 			var list = json.api_data.api_list;
 			if (!list) return;
 			$quest_count = json.api_data.api_count;
+			$quest_exec_count = json.api_data.api_exec_count;
 			if (json.api_data.api_disp_page == 1 && $quest_count != Object.keys($quest_list).length) {
 				$quest_list = {}; // 任務総数が変わったらリストをクリアする.
 			}
@@ -1111,10 +1168,13 @@ chrome.devtools.network.onRequestFinished.addListener(function (request) {
 	}
 	else if (api_name == '/api_req_sortie/battle'
 		|| api_name == '/api_req_combined_battle/battle'
+		|| api_name == '/api_req_combined_battle/battle_water'
 		|| api_name == '/api_req_combined_battle/airbattle') {
 		// 昼戦開始.
 		$battle_count++;
 		$beginhps = null;
+		$beginhps_c = null;
+		$is_water = /water/.test(api_name);
 		func = on_battle;
 	}
 	else if (api_name == '/api_req_battle_midnight/battle'
@@ -1127,6 +1187,7 @@ chrome.devtools.network.onRequestFinished.addListener(function (request) {
 		// 夜戦開始.
 		$battle_count++;
 		$beginhps = null;
+		$beginhps_c = null;
 		func = on_battle;
 	}
 	else if (api_name == '/api_req_sortie/night_to_day') {
@@ -1137,6 +1198,7 @@ chrome.devtools.network.onRequestFinished.addListener(function (request) {
 		// 演習開始.
 		$battle_count = 1;
 		$beginhps = null;
+		$beginhps_c = null;
 		$battle_log = [];
 		func = on_battle;
 	}
